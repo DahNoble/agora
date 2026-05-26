@@ -8500,3 +8500,322 @@ fn test_transfer_no_lock_always_allowed() {
         "transfer with no lock must succeed immediately"
     );
 }
+
+// ── Withdrawal Cap Tests ──────────────────────────────────────────────────────
+
+/// Helper: process a payment and settle the platform fees so that
+/// `total_fees_collected` is funded and `withdraw_platform_fees` can be called.
+fn fund_fees_for_cap_tests(
+    env: &Env,
+    client: &TicketPaymentContractClient,
+    usdc_id: &Address,
+    num_payments: u32,
+) {
+    let buyer = Address::generate(env);
+    let amount = 1000_0000000i128; // 1000 USDC per ticket
+    let total = amount * num_payments as i128;
+
+    token::StellarAssetClient::new(env, usdc_id).mint(&buyer, &total);
+    token::Client::new(env, usdc_id).approve(&buyer, &client.address, &total, &99999);
+
+    for i in 0..num_payments {
+        let pid = match i {
+            0 => String::from_str(env, "cap_p0"),
+            1 => String::from_str(env, "cap_p1"),
+            2 => String::from_str(env, "cap_p2"),
+            3 => String::from_str(env, "cap_p3"),
+            _ => String::from_str(env, "cap_px"),
+        };
+        let (_secret, hash) = test_secret(env);
+        client.process_payment(
+            &pid,
+            &String::from_str(env, "event_1"),
+            &String::from_str(env, "tier_1"),
+            &buyer,
+            &None::<Address>,
+            usdc_id,
+            &amount,
+            &1u32,
+            &crate::types::PurchaseOptions {
+                code_preimage: None,
+                referrer: None,
+                discount_code: None,
+            },
+            &hash,
+        );
+    }
+}
+
+/// A daily withdrawal cap of 100 USDC must block a 150 USDC withdrawal even
+/// when 200 USDC of fees are available.
+#[test]
+fn test_withdrawal_cap_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, usdc_id, _platform_wallet, _) = setup_test(&env);
+
+    // Process 2 payments of 1000 USDC each → 2 × 50 USDC = 100 USDC in fees.
+    // We need > 100 USDC available, so process 4 payments → 200 USDC in fees.
+    fund_fees_for_cap_tests(&env, &client, &usdc_id, 4);
+
+    let total_fees = client.get_total_fees_collected(&usdc_id);
+    assert!(
+        total_fees >= 200_0000000i128,
+        "expected at least 200 USDC in fees, got {}",
+        total_fees
+    );
+
+    // Set a daily cap of 100 USDC.
+    let cap = 100_0000000i128;
+    client.set_withdrawal_cap(&usdc_id, &cap);
+
+    // Attempting to withdraw 150 USDC must fail with WithdrawalCapExceeded.
+    let result = client.try_withdraw_platform_fees(&150_0000000i128, &usdc_id);
+    assert_eq!(
+        result,
+        Err(Ok(TicketPaymentError::WithdrawalCapExceeded)),
+        "withdrawal of 150 USDC should be blocked by a 100 USDC daily cap"
+    );
+}
+
+/// After exhausting the daily cap, advancing the ledger by more than 86400 seconds
+/// resets the day counter and a second withdrawal must succeed.
+#[test]
+fn test_withdrawal_cap_resets_after_24h() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, usdc_id, platform_wallet, _) = setup_test(&env);
+
+    // Fund enough fees for two full-cap withdrawals.
+    fund_fees_for_cap_tests(&env, &client, &usdc_id, 4);
+
+    let cap = 50_0000000i128; // 50 USDC cap per day
+    client.set_withdrawal_cap(&usdc_id, &cap);
+
+    // First withdrawal — exactly at the cap.
+    client.withdraw_platform_fees(&cap, &usdc_id);
+    let balance_after_first = token::Client::new(&env, &usdc_id).balance(&platform_wallet);
+    assert_eq!(balance_after_first, cap);
+
+    // Second withdrawal on the same day must fail.
+    let same_day_result = client.try_withdraw_platform_fees(&1_0000000i128, &usdc_id);
+    assert_eq!(
+        same_day_result,
+        Err(Ok(TicketPaymentError::WithdrawalCapExceeded)),
+        "same-day withdrawal after cap exhaustion must fail"
+    );
+
+    // Advance ledger by 86401 seconds (past the 24-hour boundary).
+    env.ledger().set_timestamp(env.ledger().timestamp() + 86401);
+
+    // Second withdrawal on the new day must succeed.
+    client.withdraw_platform_fees(&cap, &usdc_id);
+    let balance_after_second = token::Client::new(&env, &usdc_id).balance(&platform_wallet);
+    assert_eq!(
+        balance_after_second,
+        cap * 2,
+        "second withdrawal on a new day should succeed"
+    );
+}
+
+/// A withdrawal cap of 0 means unlimited — large withdrawals must not be blocked.
+#[test]
+fn test_withdrawal_cap_zero_means_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, usdc_id, platform_wallet, _) = setup_test(&env);
+
+    // Fund 4 payments → 200 USDC in fees.
+    fund_fees_for_cap_tests(&env, &client, &usdc_id, 4);
+
+    let total_fees = client.get_total_fees_collected(&usdc_id);
+    assert!(total_fees > 0);
+
+    // Explicitly set cap to 0 (unlimited).
+    client.set_withdrawal_cap(&usdc_id, &0i128);
+
+    // Withdraw the entire accumulated fee in one shot — must succeed.
+    client.withdraw_platform_fees(&total_fees, &usdc_id);
+
+    let platform_balance = token::Client::new(&env, &usdc_id).balance(&platform_wallet);
+    assert_eq!(
+        platform_balance, total_fees,
+        "cap=0 must allow withdrawing the full fee balance"
+    );
+}
+
+// ── Referral Tests ────────────────────────────────────────────────────────────
+
+/// process_payment with a referrer must transfer the correct commission to the referrer.
+///
+/// price = 1000 USDC, fee_bps = 500 (5%) → platform_fee = 50 USDC
+/// default affiliate rate = 2000 bps (20%) → reward = 50 × 20% = 10 USDC
+#[test]
+fn test_process_payment_with_referral() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let platform_wallet = Address::generate(&env);
+    let registry_id = env.register(MockEventRegistryForReferral, ());
+    client.initialize(&admin, &usdc_id, &platform_wallet, &registry_id);
+
+    let buyer = Address::generate(&env);
+    let referrer = Address::generate(&env);
+    let price = 1000_0000000i128;
+
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+
+    let (_secret, hash) = test_secret(&env);
+    client.process_payment(
+        &String::from_str(&env, "pay_ref_new"),
+        &String::from_str(&env, "event_1"),
+        &String::from_str(&env, "tier_1"),
+        &buyer,
+        &None::<Address>,
+        &usdc_id,
+        &price,
+        &1u32,
+        &crate::types::PurchaseOptions {
+            code_preimage: None,
+            referrer: Some(referrer.clone()),
+            discount_code: None,
+        },
+        &hash,
+    );
+
+    // platform_fee = 1000 × 5% = 50 USDC
+    // reward = 50 × 20% = 10 USDC  (default 2000 bps affiliate rate)
+    let expected_reward = 10_0000000i128;
+    let referrer_balance = token::Client::new(&env, &usdc_id).balance(&referrer);
+    assert_eq!(
+        referrer_balance, expected_reward,
+        "referrer must receive 10 USDC commission"
+    );
+
+    // The payment record must store the referral amount and referrer address.
+    let payment = client
+        .get_payment_status(&String::from_str(&env, "pay_ref_new"))
+        .unwrap();
+    assert_eq!(payment.referral_amount, expected_reward);
+    assert_eq!(payment.referrer, Some(referrer));
+}
+
+/// Passing the buyer's own address as the referrer must return SelfReferralNotAllowed.
+#[test]
+fn test_process_payment_self_referral_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let platform_wallet = Address::generate(&env);
+    let registry_id = env.register(MockEventRegistryForReferral, ());
+    client.initialize(&admin, &usdc_id, &platform_wallet, &registry_id);
+
+    let buyer = Address::generate(&env);
+    let price = 1000_0000000i128;
+
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+
+    let (_secret, hash) = test_secret(&env);
+    // Pass buyer as their own referrer.
+    let result = client.try_process_payment(
+        &String::from_str(&env, "pay_self_ref"),
+        &String::from_str(&env, "event_1"),
+        &String::from_str(&env, "tier_1"),
+        &buyer,
+        &None::<Address>,
+        &usdc_id,
+        &price,
+        &1u32,
+        &crate::types::PurchaseOptions {
+            code_preimage: None,
+            referrer: Some(buyer.clone()), // self-referral
+            discount_code: None,
+        },
+        &hash,
+    );
+
+    assert_eq!(
+        result,
+        Err(Ok(TicketPaymentError::SelfReferralNotAllowed)),
+        "self-referral must be rejected"
+    );
+}
+
+/// When no referrer is provided, no commission must be paid out and the
+/// payment record must store referral_amount = 0.
+#[test]
+fn test_referral_commission_zero_when_no_referrer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let platform_wallet = Address::generate(&env);
+    let registry_id = env.register(MockEventRegistryForReferral, ());
+    client.initialize(&admin, &usdc_id, &platform_wallet, &registry_id);
+
+    let buyer = Address::generate(&env);
+    let price = 1000_0000000i128;
+
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+
+    let payment_id = String::from_str(&env, "pay_no_ref");
+    let (_secret, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id,
+        &String::from_str(&env, "event_1"),
+        &String::from_str(&env, "tier_1"),
+        &buyer,
+        &None::<Address>,
+        &usdc_id,
+        &price,
+        &1u32,
+        &crate::types::PurchaseOptions {
+            code_preimage: None,
+            referrer: None, // no referrer
+            discount_code: None,
+        },
+        &hash,
+    );
+
+    // The full platform fee must stay in escrow — no commission was paid out.
+    let escrow = client.get_event_escrow_balance(&String::from_str(&env, "event_1"));
+    let expected_platform_fee = (price * 500) / 10000; // 5% = 50 USDC
+    assert_eq!(
+        escrow.platform_fee, expected_platform_fee,
+        "full platform fee must remain in escrow when there is no referrer"
+    );
+
+    // Payment record must record zero referral amount and no referrer.
+    let payment = client.get_payment_status(&payment_id).unwrap();
+    assert_eq!(
+        payment.referral_amount, 0,
+        "referral_amount must be 0 when no referrer is provided"
+    );
+    assert_eq!(
+        payment.referrer, None,
+        "referrer field must be None when no referrer is provided"
+    );
+}

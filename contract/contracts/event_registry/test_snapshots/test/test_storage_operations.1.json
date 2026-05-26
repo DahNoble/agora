@@ -40,6 +40,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "category_ids"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "created_at"
                       },
                       "val": {
@@ -182,6 +188,14 @@
                       },
                       "val": {
                         "u32": 5
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "referral_rate_bps"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
@@ -386,6 +400,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "category_ids"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "created_at"
                       },
                       "val": {
@@ -528,6 +548,14 @@
                       },
                       "val": {
                         "u32": 5
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "referral_rate_bps"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {

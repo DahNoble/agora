@@ -34,6 +34,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "category_ids"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "end_time"
                       },
                       "val": {
@@ -107,6 +113,12 @@
                       "val": {
                         "address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJXFF"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "referral_rate_bps"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -318,6 +330,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "category_ids"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "created_at"
                       },
                       "val": {
@@ -460,6 +478,14 @@
                       },
                       "val": {
                         "u32": 600
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "referral_rate_bps"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
