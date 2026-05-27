@@ -9431,3 +9431,358 @@ fn test_operations_resume_after_unpause() {
     assert_eq!(payment.amount, amount);
     assert_eq!(payment.status, PaymentStatus::Pending);
 }
+
+// ── Task 1: partial_refund unit tests ────────────────────────────────────────
+
+#[test]
+fn test_partial_refund_correct_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, usdc_id, _, _) = setup_test(&env);
+    let usdc_token = token::StellarAssetClient::new(&env, &usdc_id);
+    let buyer = Address::generate(&env);
+    let ticket_price = 1000_0000000i128;
+    usdc_token.mint(&buyer, &ticket_price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &ticket_price, &99999);
+    let event_id = String::from_str(&env, "event_1");
+    let payment_id = String::from_str(&env, "pr_amt_1");
+    let (_s, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id, &event_id, &String::from_str(&env, "tier_1"),
+        &buyer, &None::<Address>, &usdc_id, &ticket_price, &1u32,
+        &crate::types::PurchaseOptions { code_preimage: None, referrer: None, discount_code: None },
+        &hash,
+    );
+    client.confirm_payment(&payment_id, &String::from_str(&env, "tx1"));
+    let processed = client.issue_partial_refund(&event_id, &5000u32, &10);
+    assert_eq!(processed, 1);
+    // buyer should receive exactly 50% back
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&buyer), ticket_price / 2);
+}
+
+#[test]
+fn test_partial_refund_with_restocking_fee() {
+    // issue_partial_refund refunds percentage of payment.amount (restocking fee not deducted
+    // in batch path — it applies only to the individual refund path). Verify 50% of full amount.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, usdc_id, _, _) = setup_test(&env);
+    let usdc_token = token::StellarAssetClient::new(&env, &usdc_id);
+    let buyer = Address::generate(&env);
+    let ticket_price = 1000_0000000i128;
+    usdc_token.mint(&buyer, &ticket_price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &ticket_price, &99999);
+    let event_id = String::from_str(&env, "event_1");
+    let payment_id = String::from_str(&env, "pr_restock_1");
+    let (_s, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id, &event_id, &String::from_str(&env, "tier_1"),
+        &buyer, &None::<Address>, &usdc_id, &ticket_price, &1u32,
+        &crate::types::PurchaseOptions { code_preimage: None, referrer: None, discount_code: None },
+        &hash,
+    );
+    client.confirm_payment(&payment_id, &String::from_str(&env, "tx2"));
+    let processed = client.issue_partial_refund(&event_id, &5000u32, &10);
+    assert_eq!(processed, 1);
+    // 50% of ticket_price
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&buyer), ticket_price / 2);
+}
+
+// ── Task 2: check_in unit tests ───────────────────────────────────────────────
+
+/// Mock registry where is_scanner_authorized returns false for all scanners.
+#[soroban_sdk::contract]
+pub struct MockRegistryNoScanner;
+#[soroban_sdk::contractimpl]
+impl MockRegistryNoScanner {
+    pub fn get_event(env: Env, event_id: String) -> Option<event_registry::EventInfo> {
+        let organizer = Address::generate(&env);
+        let mut tiers = soroban_sdk::Map::new(&env);
+        tiers.set(String::from_str(&env, "tier_1"), event_registry::TicketTier {
+            name: String::from_str(&env, "General"),
+            price: 1000_0000000i128, early_bird_price: 1000_0000000i128,
+            early_bird_deadline: 0, usd_price: 0, tier_limit: 100, current_sold: 0,
+            is_refundable: true, auction_config: soroban_sdk::vec![&env], loyalty_multiplier: 1,
+        });
+        Some(event_registry::EventInfo {
+            event_id, name: String::from_str(&env, "Test"),
+            organizer_address: organizer, payment_address: Address::generate(&env),
+            platform_fee_percent: 500, custom_fee_bps: None, is_active: true,
+            status: event_registry::EventStatus::Active, created_at: 0,
+            metadata_cid: String::from_str(&env, "cid"), max_supply: 100, current_supply: 0,
+            milestone_plan: None, tiers, refund_deadline: 0, restocking_fee: 0,
+            resale_cap_bps: None, min_sales_target: 0, target_deadline: 0, goal_met: false,
+            banner_cid: None, tags: None, start_time: 0, end_time: 0,
+            accepted_tokens: soroban_sdk::vec![&env], use_global_whitelist: true, referral_rate_bps: 0,
+        })
+    }
+    pub fn get_event_payment_info(env: Env, _: String) -> event_registry::PaymentInfo {
+        event_registry::PaymentInfo { payment_address: Address::generate(&env), platform_fee_percent: 500, custom_fee_bps: None, referral_rate_bps: 0 }
+    }
+    pub fn increment_inventory(_: Env, _: String, _: String, _: Address, _: u32) {}
+    pub fn decrement_inventory(_: Env, _: String, _: String, _: Address) {}
+    pub fn get_global_promo_bps(_: Env) -> u32 { 0 }
+    pub fn get_promo_expiry(_: Env) -> u64 { 0 }
+    pub fn is_scanner_authorized(_: Env, _: String, _: Address) -> bool { false }
+    pub fn get_loyalty_discount_bps(_: Env, _: Address) -> u32 { 0 }
+    pub fn update_loyalty_score(_: Env, _: Address, _: Address, _: u32, _: i128, _: u32) {}
+    pub fn get_guest_profile(_: Env, _: Address) -> Option<event_registry::GuestProfile> { None }
+}
+
+/// Mock registry where is_scanner_authorized returns true for all scanners.
+#[soroban_sdk::contract]
+pub struct MockRegistryWithScanner;
+#[soroban_sdk::contractimpl]
+impl MockRegistryWithScanner {
+    pub fn get_event(env: Env, event_id: String) -> Option<event_registry::EventInfo> {
+        let mut tiers = soroban_sdk::Map::new(&env);
+        tiers.set(String::from_str(&env, "tier_1"), event_registry::TicketTier {
+            name: String::from_str(&env, "General"),
+            price: 1000_0000000i128, early_bird_price: 1000_0000000i128,
+            early_bird_deadline: 0, usd_price: 0, tier_limit: 100, current_sold: 0,
+            is_refundable: true, auction_config: soroban_sdk::vec![&env], loyalty_multiplier: 1,
+        });
+        Some(event_registry::EventInfo {
+            event_id, name: String::from_str(&env, "Test"),
+            organizer_address: Address::generate(&env), payment_address: Address::generate(&env),
+            platform_fee_percent: 500, custom_fee_bps: None, is_active: true,
+            status: event_registry::EventStatus::Active, created_at: 0,
+            metadata_cid: String::from_str(&env, "cid"), max_supply: 100, current_supply: 0,
+            milestone_plan: None, tiers, refund_deadline: 0, restocking_fee: 0,
+            resale_cap_bps: None, min_sales_target: 0, target_deadline: 0, goal_met: false,
+            banner_cid: None, tags: None, start_time: 0, end_time: 0,
+            accepted_tokens: soroban_sdk::vec![&env], use_global_whitelist: true, referral_rate_bps: 0,
+        })
+    }
+    pub fn get_event_payment_info(env: Env, _: String) -> event_registry::PaymentInfo {
+        event_registry::PaymentInfo { payment_address: Address::generate(&env), platform_fee_percent: 500, custom_fee_bps: None, referral_rate_bps: 0 }
+    }
+    pub fn increment_inventory(_: Env, _: String, _: String, _: Address, _: u32) {}
+    pub fn decrement_inventory(_: Env, _: String, _: String, _: Address) {}
+    pub fn get_global_promo_bps(_: Env) -> u32 { 0 }
+    pub fn get_promo_expiry(_: Env) -> u64 { 0 }
+    pub fn is_scanner_authorized(_: Env, _: String, _: Address) -> bool { true }
+    pub fn get_loyalty_discount_bps(_: Env, _: Address) -> u32 { 0 }
+    pub fn update_loyalty_score(_: Env, _: Address, _: Address, _: u32, _: i128, _: u32) {}
+    pub fn get_guest_profile(_: Env, _: Address) -> Option<event_registry::GuestProfile> { None }
+}
+
+#[test]
+fn test_check_in_unauthorized_scanner() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let registry_id = env.register(MockRegistryNoScanner, ());
+    client.initialize(&admin, &usdc_id, &Address::generate(&env), &registry_id);
+
+    let buyer = Address::generate(&env);
+    let price = 1000_0000000i128;
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+    let payment_id = String::from_str(&env, "ci_unauth_1");
+    let (secret, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id, &String::from_str(&env, "event_1"), &String::from_str(&env, "tier_1"),
+        &buyer, &None::<Address>, &usdc_id, &price, &1u32,
+        &crate::types::PurchaseOptions { code_preimage: None, referrer: None, discount_code: None },
+        &hash,
+    );
+    client.confirm_payment(&payment_id, &String::from_str(&env, "tx1"));
+
+    let scanner = Address::generate(&env);
+    let result = client.try_check_in(
+        &payment_id, &scanner, &None::<String>, &None::<Address>, &secret,
+    );
+    assert_eq!(result, Err(Ok(TicketPaymentError::UnauthorizedScanner)));
+}
+
+#[test]
+fn test_check_in_already_used_ticket() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let registry_id = env.register(MockRegistryWithScanner, ());
+    client.initialize(&admin, &usdc_id, &Address::generate(&env), &registry_id);
+
+    let buyer = Address::generate(&env);
+    let price = 1000_0000000i128;
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+    let payment_id = String::from_str(&env, "ci_used_1");
+    let (secret, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id, &String::from_str(&env, "event_1"), &String::from_str(&env, "tier_1"),
+        &buyer, &None::<Address>, &usdc_id, &price, &1u32,
+        &crate::types::PurchaseOptions { code_preimage: None, referrer: None, discount_code: None },
+        &hash,
+    );
+    client.confirm_payment(&payment_id, &String::from_str(&env, "tx1"));
+
+    let scanner = Address::generate(&env);
+    // First check-in succeeds
+    client.check_in(&payment_id, &scanner, &None::<String>, &None::<Address>, &secret);
+    // Second check-in should fail with TicketAlreadyUsed
+    let result = client.try_check_in(
+        &payment_id, &scanner, &None::<String>, &None::<Address>, &secret,
+    );
+    assert_eq!(result, Err(Ok(TicketPaymentError::TicketAlreadyUsed)));
+}
+
+#[test]
+fn test_check_in_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let registry_id = env.register(MockRegistryWithScanner, ());
+    client.initialize(&admin, &usdc_id, &Address::generate(&env), &registry_id);
+
+    let buyer = Address::generate(&env);
+    let price = 1000_0000000i128;
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&buyer, &price);
+    token::Client::new(&env, &usdc_id).approve(&buyer, &client.address, &price, &99999);
+    let payment_id = String::from_str(&env, "ci_ok_1");
+    let (secret, hash) = test_secret(&env);
+    client.process_payment(
+        &payment_id, &String::from_str(&env, "event_1"), &String::from_str(&env, "tier_1"),
+        &buyer, &None::<Address>, &usdc_id, &price, &1u32,
+        &crate::types::PurchaseOptions { code_preimage: None, referrer: None, discount_code: None },
+        &hash,
+    );
+    client.confirm_payment(&payment_id, &String::from_str(&env, "tx1"));
+
+    let scanner = Address::generate(&env);
+    client.check_in(&payment_id, &scanner, &None::<String>, &None::<Address>, &secret);
+
+    let payment = client.get_payment_status(&payment_id).unwrap();
+    assert_eq!(payment.status, PaymentStatus::CheckedIn);
+}
+
+// ── Task 4: claim_revenue milestone unit tests ────────────────────────────────
+
+/// Mock registry for milestone withdraw_organizer_funds tests.
+/// Stores current_supply and organizer address in instance storage.
+/// Event is ended (end_time=1) so the ESCROW_DELAY check passes when ledger time > 1+86400.
+#[soroban_sdk::contract]
+pub struct MockRegistryMilestone;
+#[soroban_sdk::contractimpl]
+impl MockRegistryMilestone {
+    pub fn get_event(env: Env, event_id: String) -> Option<event_registry::EventInfo> {
+        let organizer = env.storage().instance()
+            .get::<Symbol, Address>(&Symbol::new(&env, "organizer"))
+            .unwrap_or_else(|| Address::generate(&env));
+        let current_supply: i128 = env.storage().instance()
+            .get(&Symbol::new(&env, "supply")).unwrap_or(0);
+        let mut milestones = soroban_sdk::Vec::new(&env);
+        milestones.push_back(event_registry::Milestone { sales_threshold: 100, release_percent: 5000 });
+        Some(event_registry::EventInfo {
+            event_id, name: String::from_str(&env, "Milestone Event"),
+            organizer_address: organizer.clone(), payment_address: organizer,
+            platform_fee_percent: 500, custom_fee_bps: None,
+            is_active: true, status: event_registry::EventStatus::Active,
+            created_at: 0, metadata_cid: String::from_str(&env, "cid"),
+            max_supply: 200, current_supply,
+            milestone_plan: Some(milestones),
+            tiers: soroban_sdk::Map::new(&env),
+            refund_deadline: 0, restocking_fee: 0, resale_cap_bps: None,
+            min_sales_target: 0, target_deadline: 0, goal_met: true,
+            banner_cid: None, tags: None, start_time: 0, end_time: 1,
+            accepted_tokens: soroban_sdk::vec![&env], use_global_whitelist: true, referral_rate_bps: 0,
+        })
+    }
+    pub fn get_event_payment_info(env: Env, _: String) -> event_registry::PaymentInfo {
+        event_registry::PaymentInfo { payment_address: Address::generate(&env), platform_fee_percent: 500, custom_fee_bps: None, referral_rate_bps: 0 }
+    }
+    pub fn set_organizer(env: Env, organizer: Address) {
+        env.storage().instance().set(&Symbol::new(&env, "organizer"), &organizer);
+    }
+    pub fn set_supply(env: Env, supply: i128) {
+        env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+    }
+    pub fn increment_inventory(_: Env, _: String, _: String, _: Address, _: u32) {}
+    pub fn decrement_inventory(_: Env, _: String, _: String, _: Address) {}
+    pub fn get_global_promo_bps(_: Env) -> u32 { 0 }
+    pub fn get_promo_expiry(_: Env) -> u64 { 0 }
+    pub fn is_scanner_authorized(_: Env, _: String, _: Address) -> bool { false }
+    pub fn get_loyalty_discount_bps(_: Env, _: Address) -> u32 { 0 }
+    pub fn update_loyalty_score(_: Env, _: Address, _: Address, _: u32, _: i128, _: u32) {}
+    pub fn get_guest_profile(_: Env, _: Address) -> Option<event_registry::GuestProfile> { None }
+}
+
+#[test]
+fn test_claim_revenue_milestone_not_met() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let organizer = Address::generate(&env);
+    let registry_id = env.register(MockRegistryMilestone, ());
+    let registry = MockRegistryMilestoneClient::new(&env, &registry_id);
+    registry.set_organizer(&organizer);
+    // 50 tickets sold — below the 100-ticket threshold, so release_percent = 0
+    registry.set_supply(&50i128);
+
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    client.initialize(&admin, &usdc_id, &Address::generate(&env), &registry_id);
+
+    let organizer_amount: i128 = 1000_0000000;
+    let platform_fee: i128 = 50_0000000;
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&client.address, &(organizer_amount + platform_fee));
+    let event_id = String::from_str(&env, "ms_event");
+    env.as_contract(&client.address, || {
+        update_event_balance(&env, event_id.clone(), organizer_amount, platform_fee);
+    });
+
+    // Advance past end_time (1) + ESCROW_DELAY (86400)
+    env.ledger().set_timestamp(90000);
+
+    // Milestone not met → release_percent = 0 → nothing released
+    let withdrawn = client.withdraw_organizer_funds(&event_id, &usdc_id);
+    assert_eq!(withdrawn, 0);
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&organizer), 0);
+}
+
+#[test]
+fn test_claim_revenue_milestone_met() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let organizer = Address::generate(&env);
+    let registry_id = env.register(MockRegistryMilestone, ());
+    let registry = MockRegistryMilestoneClient::new(&env, &registry_id);
+    registry.set_organizer(&organizer);
+    // 100 tickets sold — meets the threshold for 50% release
+    registry.set_supply(&100i128);
+
+    let contract_id = env.register(TicketPaymentContract, ());
+    let client = TicketPaymentContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let usdc_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    client.initialize(&admin, &usdc_id, &Address::generate(&env), &registry_id);
+
+    let organizer_amount: i128 = 1000_0000000;
+    let platform_fee: i128 = 50_0000000;
+    token::StellarAssetClient::new(&env, &usdc_id).mint(&client.address, &(organizer_amount + platform_fee));
+    let event_id = String::from_str(&env, "ms_event");
+    env.as_contract(&client.address, || {
+        update_event_balance(&env, event_id.clone(), organizer_amount, platform_fee);
+    });
+
+    env.ledger().set_timestamp(90000);
+
+    // Milestone met → 50% of total_revenue (organizer_amount) released
+    let withdrawn = client.withdraw_organizer_funds(&event_id, &usdc_id);
+    let expected = (organizer_amount * 5000) / 10000;
+    assert_eq!(withdrawn, expected);
+    assert_eq!(token::Client::new(&env, &usdc_id).balance(&organizer), expected);
+}
