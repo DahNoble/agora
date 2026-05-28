@@ -159,6 +159,7 @@ export function Navbar() {
                       text="Home"
                       isActive={pathname === "/home"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Home"
                     />
                     <MobileNavLink
                       i={1}
@@ -170,6 +171,7 @@ export function Navbar() {
                         pathname.startsWith("/events")
                       }
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Discover Events"
                     />
                     <MobileNavLink
                       i={2}
@@ -178,6 +180,7 @@ export function Navbar() {
                       text="Organizers"
                       isActive={pathname === "/organizers"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Organizers"
                     />
                     <MobileNavLink
                       i={3}
@@ -186,6 +189,7 @@ export function Navbar() {
                       text="Stellar Ecosystem"
                       isActive={pathname === "/stellar"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Stellar Ecosystem"
                     />
                   </>
                 ) : (
@@ -200,6 +204,7 @@ export function Navbar() {
                         pathname.startsWith("/events")
                       }
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Discover Events"
                     />
                     <MobileNavLink
                       i={1}
@@ -208,6 +213,7 @@ export function Navbar() {
                       text="Pricing"
                       isActive={pathname === "/pricing"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Pricing"
                     />
                     <MobileNavLink
                       i={2}
@@ -216,6 +222,7 @@ export function Navbar() {
                       text="Stellar Ecosystem"
                       isActive={pathname === "/stellar"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Stellar Ecosystem"
                     />
                     <MobileNavLink
                       i={3}
@@ -224,6 +231,7 @@ export function Navbar() {
                       text="FAQs"
                       isActive={pathname === "/faqs"}
                       onClose={() => setIsOpen(false)}
+                      ariaLabel="Frequently Asked Questions"
                     />
                   </>
                 )}

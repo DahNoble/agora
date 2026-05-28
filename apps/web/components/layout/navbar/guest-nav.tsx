@@ -25,24 +25,28 @@ export function GuestNav({ pathname }: { pathname: string }) {
             icon="/icons/earth.svg"
             text="Discover Events"
             isActive={pathname === "/discover" || pathname.startsWith("/events")}
+            ariaLabel="Discover Events"
           />
           <NavLink
             href="/pricing"
             icon="/icons/dollar-circle.svg"
             text="Pricing"
             isActive={pathname === "/pricing"}
+            ariaLabel="Pricing"
           />
           <NavLink
             href="/stellar"
             icon="/icons/stellar-xlm-logo 1.svg"
             text="Stellar Ecosystem"
             isActive={pathname === "/stellar"}
+            ariaLabel="Stellar Ecosystem"
           />
           <NavLink
             href="/faqs"
             icon="/icons/help-circle.svg"
             text="FAQs"
             isActive={pathname === "/faqs"}
+            ariaLabel="Frequently Asked Questions"
           />
         </div>
 

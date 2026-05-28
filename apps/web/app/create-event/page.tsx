@@ -93,9 +93,10 @@ export default function CreateEventPage() {
       setCreatedEventId(data.event.id);
       setIsSuccess(true);
       toast.success("Event created successfully!");
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } catch (error: any) {
-      toast.error(error.message || "Something went wrong");
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Something went wrong";
+      toast.error(errorMessage);
     } finally {
       setIsSubmitting(false);
     }

@@ -26,6 +26,7 @@ export function UserNav({ pathname }: { pathname: string }) {
               icon="/icons/home.svg"
               text="Home"
               isActive={pathname === "/"}
+              ariaLabel="Home"
             />
             <NavLink
               href="/discover"
@@ -34,18 +35,21 @@ export function UserNav({ pathname }: { pathname: string }) {
               isActive={
                 pathname === "/discover" || pathname.startsWith("/events")
               }
+              ariaLabel="Discover Events"
             />
             <NavLink
               href="/organizers"
               icon="/icons/user-group.svg"
               text="Organizers"
               isActive={pathname === "/organizers"}
+              ariaLabel="Organizers"
             />
             <NavLink
               href="/stellar"
               icon="/icons/stellar-xlm-logo 1.svg"
               text="Stellar Ecosystem"
               isActive={pathname === "/stellar"}
+              ariaLabel="Stellar Ecosystem"
             />
           </div>
 
