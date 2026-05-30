@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma, type Prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
+import { type Prisma } from "@prisma/client";
 import { getAuthFromRequest } from "@/lib/auth";
 import { withErrorHandler } from "@/lib/api-handler";
 import { throwApiError } from "@/lib/api-errors";
